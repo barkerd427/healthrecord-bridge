@@ -12,7 +12,7 @@ or anything else that reads FHIR R4 JSON.
 - Deterministic resource ids, so re-importing the same export updates rows instead of
   duplicating them.
 - Reads bare XML or the IHE XDM zip MyChart emits, without unpacking anything by hand.
-- Tells you what it did not map, per section, so nothing silently disappears.
+- Reports what it did not map, per section.
 
 ## Install
 
