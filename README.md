@@ -90,6 +90,51 @@ report.to_dict()  # JSON-friendly version of the report
 `convert` raises `healthrecord_bridge.ccda.CcdaError` (a `ValueError`) when the input is
 not a C-CDA document or is unsafe to parse.
 
+## Anonymizing a real export
+
+A real MyChart export is useful as a test fixture only once nothing in it points back to a
+person. `hrb anonymize` rewrites one C-CDA XML file into a copy that keeps the clinical
+content and the document structure but not the identity:
+
+```sh
+hrb anonymize DOC0001.XML fixture.xml --seed my-seed --report anonymize.json
+```
+
+What it changes:
+
+- Every HL7 timestamp (`effectiveTime`, `low`, `high`, `time`, `birthTime`, ...) is moved by
+  the same number of days, between 30 and 730 in either direction, derived from the seed.
+  Precision is kept, so intervals between dates survive. The birth date is additionally
+  rounded to January 1 of its shifted year.
+- Every `<id>` extension (and any root that is not an OID) becomes a stable hash of the
+  seed and the original value, so the same identifier still maps to the same output
+  everywhere in the document.
+- The patient becomes Alex Testperson; everyone else (authors, performers, informants,
+  guardians, custodians) becomes Pat Clinician at Example Health System, with a fixed
+  address and `tel:+1-555-0100` / `mailto:patient@example.com` telecoms.
+- Section narrative, titles, `originalText` and `displayName` values have the names seen in
+  the header replaced with the same substitutes, and phone numbers, email addresses and
+  `MRN: 12345` patterns are blanked.
+
+Codes, code systems, units, measurement values and the narrative tables are left as they
+are, so the converter produces the same resources from the scrubbed file as from the
+original. The same seed always gives byte-identical output; without `--seed` a random seed
+is used and printed.
+
+The scrubber only knows the names that appear in structured header elements. Free text can
+mention relatives, employers, other clinicians or places it has never seen, so a person
+must still read the whole output before sharing it. The report lists `residual_findings`
+(long digit runs, phone and email shapes that survived scrubbing) as a starting point, and
+the command warns on stderr when that list is not empty.
+
+```python
+from healthrecord_bridge.ccda.anonymize import anonymize, anonymize_file
+
+scrubbed, report = anonymize(xml_bytes, seed="my-seed")
+report = anonymize_file("DOC0001.XML", "fixture.xml", seed="my-seed")
+print(report.day_shift, report.residual_findings)
+```
+
 ## Input formats
 
 - A bare C-CDA XML file. The root element must be `{urn:hl7-org:v3}ClinicalDocument`.

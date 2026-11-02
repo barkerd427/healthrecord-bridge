@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from . import __version__
 from .ccda import CcdaError, convert_many
+from .ccda.anonymize import anonymize_file
 from .fhir.ndjson import write_ndjson
 
 
@@ -43,6 +46,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument("-q", "--quiet", action="store_true", help="do not print the report to stderr")
     c.set_defaults(func=cmd_ccda2fhir)
+
+    a = sub.add_parser(
+        "anonymize",
+        help="scrub identity and shift dates in a C-CDA XML file so it can be shared",
+    )
+    a.add_argument("input", metavar="INPUT", help="C-CDA XML file")
+    a.add_argument("output", metavar="OUTPUT", help="where to write the scrubbed XML")
+    a.add_argument(
+        "--seed",
+        metavar="SEED",
+        help="seed for the day shift and id hashes (same seed, same output; default: random)",
+    )
+    a.add_argument("--report", metavar="report.json", help="write the anonymize report as JSON")
+    a.set_defaults(func=cmd_anonymize)
     return parser
 
 
@@ -69,6 +86,29 @@ def cmd_ccda2fhir(args: argparse.Namespace) -> int:
             fh.write("\n")
     if not args.quiet:
         print(report.format(), file=sys.stderr)
+    return 0
+
+
+def cmd_anonymize(args: argparse.Namespace) -> int:
+    seed = args.seed if args.seed is not None else secrets.token_hex(8)
+    try:
+        report = anonymize_file(Path(args.input), Path(args.output), seed=seed)
+    except (CcdaError, FileNotFoundError, ValueError, OSError) as exc:
+        print(f"hrb: error: {exc}", file=sys.stderr)
+        return 1
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump(report.to_dict(), fh, indent=2)
+            fh.write("\n")
+    print(f"{args.output}: {report.summary()} (seed {seed})")
+    if report.residual_findings:
+        print(
+            f"hrb: warning: {len(report.residual_findings)} residual findings; "
+            "read the output before sharing it",
+            file=sys.stderr,
+        )
+        for finding in report.residual_findings:
+            print(f"  {finding}", file=sys.stderr)
     return 0
 
 

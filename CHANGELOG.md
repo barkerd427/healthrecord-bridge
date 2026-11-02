@@ -19,3 +19,6 @@ All notable changes to this project are recorded here. The format follows
 - `ConversionReport` with per-section entry, resource and skip counts, unmapped sections
   and unmapped code systems.
 - NDJSON writer (one file per resource type) and a merged-bundle mode for several inputs.
+- C-CDA anonymizer (`hrb anonymize`, `healthrecord_bridge.ccda.anonymize`): seeded day
+  shift, hashed identifiers, substituted names, addresses and telecoms, narrative scrubbing
+  and an `AnonymizeReport` with residual findings for a human reviewer.

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..fhir.bundle import make_bundle, merge_bundles
 from . import xdm
+from .anonymize import AnonymizeReport, anonymize, anonymize_file
 from .context import Context
 from .datetime_utils import normalize_offset
 from .document import CdaDocument
@@ -28,12 +29,15 @@ from .sections import KNOWN_UNMAPPED, find_spec
 
 __all__ = [
     "NAMESPACE_HRB",
+    "AnonymizeReport",
     "CcdaError",
     "ConversionReport",
     "DocumentReport",
     "NoDocumentsFoundError",
     "NotClinicalDocumentError",
     "UnsafeXmlError",
+    "anonymize",
+    "anonymize_file",
     "convert",
     "convert_bytes",
     "convert_document",
