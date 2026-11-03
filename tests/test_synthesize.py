@@ -29,6 +29,7 @@ from healthrecord_bridge.ccda.synthesize import (
 from healthrecord_bridge.cli import main
 
 MARCO = next(p for p in SYNTHEA if p.name.startswith("Marco578"))
+NS_SDTC = {"sdtc": "urn:hl7-org:sdtc"}
 FIXTURES = [HANDWRITTEN, MARCO]
 KEPT_SECTIONS = {"8716-3", "29762-2", "46240-8"}
 UNKNOWN_SECTION = b"""
@@ -49,6 +50,32 @@ UNKNOWN_SECTION = b"""
         </section>
       </component>
     </structuredBody>"""
+PATIENT_NOTE = b"""
+      <component>
+        <section>
+          <code code="X-CE-PFD" codeSystem="1.2.840.114350.1.72.2" displayName="Note"/>
+          <title>Note from Dr Example</title>
+          <text><paragraph>Dear Jane, your potassium was high again.</paragraph></text>
+        </section>
+      </component>
+    </structuredBody>"""
+SPECIALTY = b"""
+  <documentationOf>
+    <serviceEvent classCode="PCPR">
+      <performer typeCode="PRF">
+        <assignedEntity>
+          <id root="2.16.840.1.113883.4.6" extension="1234567893"/>
+          <code code="207R00000X" codeSystem="2.16.840.1.113883.6.101"
+              displayName="Internal Medicine">
+            <originalText>Internal Medicine</originalText>
+            <translation code="17" codeSystem="1.2.840.114350.1.13.362.2.7.10.836982.1050"
+                displayName="Internal Medicine"/>
+          </code>
+        </assignedEntity>
+      </performer>
+    </serviceEvent>
+  </documentationOf>
+  <documentationOf>"""
 
 
 def table_strings() -> set[str]:
@@ -290,6 +317,100 @@ def test_residual_findings_report_leftover_text():
     )
     _, report = synthesize(data, seed="s")
     assert any("lisinopril 10 MG tablet" in f and "/title" in f for f in report.residual_findings)
+
+
+def test_demographics_are_neutralized():
+    data = HANDWRITTEN.read_bytes().replace(
+        b'<administrativeGenderCode code="F" codeSystem="2.16.840.1.113883.5.1" '
+        b'displayName="Female"/>',
+        b'<administrativeGenderCode nullFlavor="ASKU"><originalText>Declined</originalText>'
+        b"</administrativeGenderCode>"
+        b'<religiousAffiliationCode code="1013" codeSystem="2.16.840.1.113883.5.1076" '
+        b'codeSystemName="ReligiousAffiliation" displayName="Christian"/>',
+    )
+    out, report = synthesize(data, seed="s")
+    text = out.decode("utf-8")
+    for token in ("White", "European", "Christian", "Married", "Declined"):
+        assert token not in text, token
+    patient = etree.fromstring(out).find(".//c:recordTarget/c:patientRole/c:patient", NS)
+    for race in patient.findall("c:raceCode", NS) + patient.findall("sdtc:raceCode", NS_SDTC):
+        assert race.get("code") == "2131-1" and race.get("displayName") == "Other Race"
+        assert race.get("codeSystem") == "2.16.840.1.113883.6.238"
+    assert len(patient.findall("sdtc:raceCode", NS_SDTC)) == 1
+    ethnic = patient.find("c:ethnicGroupCode", NS)
+    assert ethnic.get("code") == "2186-5" and ethnic.get("displayName") == "Not Hispanic or Latino"
+    religion = patient.find("c:religiousAffiliationCode", NS)
+    assert dict(religion.attrib) == {"nullFlavor": "UNK"}
+    marital = patient.find("c:maritalStatusCode", NS)
+    assert marital.get("code") == "U" and marital.get("displayName") == "Unknown"
+    assert marital.get("codeSystem") == "2.16.840.1.113883.5.2"
+    gender = patient.find("c:administrativeGenderCode", NS)
+    assert dict(gender.attrib) == {
+        "code": "UN",
+        "codeSystem": "2.16.840.1.113883.5.1",
+        "displayName": "Undifferentiated",
+    }
+    assert len(gender) == 0
+    assert patient.find("c:languageCommunication/c:languageCode", NS).get("code") == "en"
+    assert report.residual_findings == []
+
+
+def test_gender_with_code_is_kept():
+    out, _ = synthesize(HANDWRITTEN.read_bytes(), seed="s")
+    gender = etree.fromstring(out).find(".//c:patient/c:administrativeGenderCode", NS)
+    assert gender.get("code") == "F" and gender.get("displayName") == "Female"
+
+
+def test_birth_year_in_range_and_seed_stable():
+    data = HANDWRITTEN.read_bytes()
+    years = set()
+    for seed in ("a", "b", "c", "d", "e", "f"):
+        out, _ = synthesize(data, seed=seed)
+        again, _ = synthesize(data, seed=seed)
+        assert out == again
+        value = etree.fromstring(out).find(".//c:patient/c:birthTime", NS).get("value")
+        assert len(value) == 8 and value[4:] == "0101"
+        assert 2024 - 70 <= int(value[:4]) <= 2024 - 25
+        years.add(value[:4])
+    assert len(years) > 1
+    data = data.replace(b'<birthTime value="19840722"/>', b'<birthTime value="19840722143000"/>')
+    out, _ = synthesize(data, seed="a")
+    value = etree.fromstring(out).find(".//c:patient/c:birthTime", NS).get("value")
+    assert len(value) == 14 and value[4:] == "0101143000"
+
+
+def test_specialty_text_is_removed_and_codes_kept():
+    data = HANDWRITTEN.read_bytes().replace(b"  <documentationOf>", SPECIALTY, 1)
+    out, report = synthesize(data, seed="s")
+    assert b"Internal Medicine" not in out
+    code = etree.fromstring(out).find(".//c:performer[@typeCode='PRF']/c:assignedEntity/c:code", NS)
+    assert code.get("code") == "207R00000X" and code.get("displayName") == "Removed"
+    assert code.find("c:originalText", NS).text == "Removed"
+    translation = code.find("c:translation", NS)
+    assert translation.get("code") == "17" and translation.get("displayName") == "Removed"
+    assert translation.get("codeSystem") == "1.2.840.114350.1.13.0.2.7.10.836982.1050"
+    assert report.residual_findings == []
+
+
+def test_patient_facing_note_is_blanked_without_report():
+    data = HANDWRITTEN.read_bytes().replace(b"    </structuredBody>", PATIENT_NOTE)
+    out, report = synthesize(data, seed="s")
+    assert b"potassium" not in out
+    sec = etree.fromstring(out).xpath(".//c:section[c:code/@code='X-CE-PFD']", namespaces=NS)[0]
+    assert sec.find("c:text/c:paragraph", NS).text == "Narrative removed."
+    assert report.unrecognized_sections == []
+    assert report.entries_replaced["X-CE-PFD"] == 0
+
+
+def test_residual_check_ignores_anonymizer_substitutes():
+    data = HANDWRITTEN.read_bytes().replace(
+        b'<item ID="enc2">Hospital admission</item>',
+        b'<item ID="enc2">Hospital admission of Jane Sampleton at Example Health System, '
+        b"seen by Robert Clinician (NPI 1234567890), 123 Example St, Springfield</item>",
+    )
+    _, report = synthesize(data, seed="s")
+    assert report.residual_findings == []
+    assert report.anonymize.residual_findings == []
 
 
 def test_cli_synthesize(tmp_path, capsys):

@@ -16,6 +16,43 @@ from healthrecord_bridge.ccda.anonymize import anonymize, anonymize_file, day_sh
 from healthrecord_bridge.cli import main
 
 FIXTURES = [HANDWRITTEN, XDM_SOURCE_XML]
+EPIC_CUSTOMER = b"1.2.840.114350.1.13.362"
+PERFORMER = b"""
+  <documentationOf>
+    <serviceEvent classCode="PCPR">
+      <performer typeCode="PRF">
+        <assignedEntity>
+          <id root="2.16.840.1.113883.4.6" extension="1234567893" assigningAuthorityName="NPI"/>
+          <id root="1.2.840.114350.1.13.362.2.7.8.688883.3677179739" assigningAuthorityName="EPIC"/>
+          <id root="1.2.840.114350.1.13.362.2.7.8.688883.2" assigningAuthorityName="EPC"/>
+          <code code="207R00000X" codeSystem="2.16.840.1.113883.6.101">
+            <originalText>Internal Medicine</originalText>
+            <translation code="32" codeSystem="1.2.840.114350.1.72.1.7.7.10.688867.4160"/>
+            <translation code="17" codeSystem="1.2.840.114350.1.13.362.2.7.10.836982.1050"/>
+          </code>
+          <addr nullFlavor="UNK"><city>Boston</city></addr>
+          <telecom nullFlavor="UNK" value="tel:+1-617-555-0199"/>
+          <assignedPerson><name nullFlavor="UNK">Rosa Attending</name></assignedPerson>
+          <representedOrganization classCode="ORG">
+            <name nullFlavor="UNK">Big City Brigham</name>
+            <addr nullFlavor="UNK"/>
+          </representedOrganization>
+        </assignedEntity>
+      </performer>
+    </serviceEvent>
+  </documentationOf>
+  <documentationOf>"""
+
+
+def with_performer(extra: bytes = b"") -> bytes:
+    data = HANDWRITTEN.read_bytes().replace(b"  <documentationOf>", PERFORMER, 1)
+    return data.replace(b'<item ID="enc2">Hospital admission</item>', extra) if extra else data
+
+
+def performer_entity(root: etree._Element) -> etree._Element:
+    return root.find(".//c:performer[@typeCode='PRF']/c:assignedEntity", NS)
+
+
 PATIENT_TOKENS = {
     HANDWRITTEN: ["Jane", "Quinn", "Sampleton", "jane.sampleton", "913-555", "Overland Park"],
     XDM_SOURCE_XML: ["Letha284", "Haag279", "Robel Vale", "Bedford"],
@@ -138,7 +175,11 @@ def test_codes_and_structure_unchanged(pair):
     rb, ra = etree.fromstring(original), etree.fromstring(out)
 
     def codes(root):
-        return [(e.get("code"), e.get("codeSystem")) for e in root.iter() if e.get("code")]
+        return [
+            (e.get("code"), (e.get("codeSystem") or "").replace(".1.13.999.", ".1.13.0."))
+            for e in root.iter()
+            if e.get("code")
+        ]
 
     assert codes(ra) == codes(rb)
     assert len(codes(ra)) == original.count(b" code=")
@@ -179,6 +220,7 @@ def test_report_has_no_residual_findings(pair):
     assert set(d) == {
         "day_shift",
         "ids_rewritten",
+        "oids_rewritten",
         "names_rewritten",
         "telecoms_rewritten",
         "addresses_rewritten",
@@ -211,6 +253,124 @@ def test_narrative_phone_email_and_mrn_are_scrubbed():
     assert report.narrative_replacements >= 3
     assert any("123456789" in f for f in report.residual_findings)
     assert any("Encounters" in f for f in report.residual_findings)
+
+
+def test_null_flavor_names_and_addresses_are_scrubbed():
+    out, report = anonymize(with_performer(), seed="s")
+    text = out.decode("utf-8")
+    for token in ("Big City Brigham", "Rosa", "Attending", "Boston", "617-555"):
+        assert token not in text, token
+    entity = performer_entity(etree.fromstring(out))
+    org = entity.find("c:representedOrganization/c:name", NS)
+    assert org.get("nullFlavor") == "UNK" and org.text == "Example Health System"
+    assert len(entity.find("c:representedOrganization/c:addr", NS)) == 0
+    person = entity.find("c:assignedPerson/c:name", NS)
+    assert person.get("nullFlavor") == "UNK"
+    assert [c.text for c in person] == ["Pat", "Clinician"]
+    addr = entity.find("c:addr", NS)
+    assert addr.get("nullFlavor") == "UNK" and addr.find("c:city", NS).text == "Springfield"
+    assert entity.find("c:telecom", NS).get("value") == "tel:+1-555-0100"
+    assert report.names_rewritten >= 2
+
+
+def test_epic_customer_oids_are_rewritten():
+    data = with_performer(
+        b'<item ID="enc2">Order 1.2.840.114350.1.13.362.2.7.2.798268.1455851590 placed</item>'
+    )
+    out, report = anonymize(data, seed="s")
+    text = out.decode("utf-8")
+    assert "114350.1.13.362" not in text and "114350.1.13.999" not in text
+    assert "1.2.840.114350.1.72.1.7.7.10.688867.4160" in text
+    expected = data.count(EPIC_CUSTOMER) + data.count(b"1.2.840.114350.1.13.999")
+    assert report.oids_rewritten == expected
+    root = etree.fromstring(out)
+    assert root.find("c:id", NS).get("root") == "1.2.840.114350.1.13.0.2.7.8.688883.9999"
+    entity = performer_entity(root)
+    ids = entity.findall("c:id", NS)
+    assert re.fullmatch(r"1\.2\.840\.114350\.1\.13\.0\.2\.7\.8\.688883\.\d{8}", ids[1].get("root"))
+    assert ids[2].get("root") == "1.2.840.114350.1.13.0.2.7.8.688883.2"
+    systems = [t.get("codeSystem") for t in entity.findall("c:code/c:translation", NS)]
+    assert systems[1] == "1.2.840.114350.1.13.0.2.7.10.836982.1050"
+    item = root.find(".//c:item[@ID='enc2']", NS).text
+    assert item == "Order 1.2.840.114350.1.13.0.2.7.2.798268.1455851590 placed"
+    assert "oids" in report.summary()
+
+
+def test_assigning_authority_names():
+    out, _ = anonymize(with_performer(), seed="s")
+    ids = performer_entity(etree.fromstring(out)).findall("c:id", NS)
+    assert [i.get("assigningAuthorityName") for i in ids] == ["Example", "EPIC", "EPC"]
+
+
+def test_npi_in_narrative_is_scrubbed():
+    data = with_performer(
+        b'<item ID="enc2">Seen by Dr. X (NPI: 1234567890), covering NPI 9876543210.</item>'
+    )
+    out, report = anonymize(data, seed="s")
+    item = etree.fromstring(out).find(".//c:item[@ID='enc2']", NS).text
+    assert item == "Seen by Dr. X (NPI: 0000000000), covering NPI 0000000000."
+    assert report.narrative_replacements >= 2
+    assert report.residual_findings == []
+
+
+def test_residual_check_ignores_substitutes():
+    data = with_performer(
+        b'<item ID="enc2">Alex Testperson, Pat Clinician, Example Health System, '
+        b"123 Example St, Springfield, patient@example.com, 555-0100, MRN: 00000, "
+        b"NPI 0000000000, [email removed]</item>"
+    )
+    _, report = anonymize(data, seed="s")
+    assert report.residual_findings == []
+
+
+def test_name_tokens_are_replaced_outside_narrative():
+    data = HANDWRITTEN.read_bytes().replace(
+        b"  <custodian>",
+        b'  <author><time value="20240315"/><assignedAuthor><id root="1.2.3"/>'
+        b"<assignedAuthoringDevice><manufacturerModelName>Epic for Jane Sampleton"
+        b"</manufacturerModelName><softwareName>Sampletonic 2</softwareName>"
+        b"</assignedAuthoringDevice></assignedAuthor></author>\n  <custodian>",
+    )
+    out, _ = anonymize(data, seed="s")
+    root = etree.fromstring(out)
+    assert root.find(".//c:manufacturerModelName", NS).text == "Epic for Alex Testperson"
+    assert root.find(".//c:softwareName", NS).text == "Sampletonic 2"
+
+
+def test_organization_words_are_not_patient_tokens():
+    data = HANDWRITTEN.read_bytes().replace(
+        b"<name>Example Health System</name>\n      </providerOrganization>",
+        b"<name>Care Partners Clinic</name>\n      </providerOrganization>",
+    )
+    out, _ = anonymize(data, seed="s")
+    root = etree.fromstring(out)
+    assert root.find("c:title", NS).text == "Continuity of Care Document"
+    assert root.find(".//c:providerOrganization/c:name", NS).text == "Example Health System"
+    assert b"Partners" not in out
+
+
+def test_record_numbers_in_narrative_ids_are_hashed():
+    data = (
+        HANDWRITTEN.read_bytes()
+        .replace(b'ID="enc2"', b'ID="enc_5790225540"')
+        .replace(b'value="#enc2"', b'value="#enc_5790225540"')
+    )
+    out, report = anonymize(data, seed="s")
+    again, _ = anonymize(data, seed="s")
+    assert out == again
+    assert b"5790225540" not in out
+    root = etree.fromstring(out)
+    ids = {el.get("ID") for el in root.iter() if el.get("ID")}
+    new = next(i for i in ids if i.startswith("enc_"))
+    assert re.fullmatch(r"enc_\d{8}", new)
+    assert root.find(".//c:encounter/c:text/c:reference", NS).get("value") in {
+        f"#{new}",
+        "#enc1",
+    }
+    refs = {r.get("value").lstrip("#") for r in root.iter("{urn:hl7-org:v3}reference")}
+    assert refs <= ids
+    _, plain = anonymize(HANDWRITTEN.read_bytes(), seed="s")
+    assert report.ids_rewritten == plain.ids_rewritten + 1
 
 
 def test_cli_anonymize(tmp_path, capsys):

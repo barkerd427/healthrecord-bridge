@@ -19,11 +19,11 @@ from pathlib import Path
 
 from lxml import etree
 
-from .anonymize import AnonymizeReport, anonymize
+from .anonymize import SUBSTITUTES, AnonymizeReport, anonymize
 from .document import CdaDocument, Section, parse_xml
 from .mappers._shared import statement_of
 from .sections import KNOWN_UNMAPPED, find_spec
-from .xml import attr, child, children, find, local_name, q, text_of, xsi_type
+from .xml import NSMAP, SDTC_NS, attr, child, children, find, local_name, q, text_of, xsi_type
 
 SNOMED = "2.16.840.1.113883.6.96"
 LOINC = "2.16.840.1.113883.6.1"
@@ -33,6 +33,8 @@ ICD10CM = "2.16.840.1.113883.6.90"
 CPT = "2.16.840.1.113883.6.12"
 NCI = "2.16.840.1.113883.3.26.1.1"
 UNII = "2.16.840.1.113883.4.9"
+CDC_RACE = "2.16.840.1.113883.6.238"
+ADMINISTRATIVE_GENDER = "2.16.840.1.113883.5.1"
 _SYSTEM_NAMES = {
     SNOMED: "SNOMED CT",
     LOINC: "LOINC",
@@ -42,6 +44,7 @@ _SYSTEM_NAMES = {
     CPT: "CPT",
     NCI: "NCI Thesaurus",
     UNII: "UNII",
+    CDC_RACE: "CDC Race and Ethnicity",
 }
 
 REMOVED = "Removed"
@@ -49,6 +52,8 @@ NARRATIVE_REMOVED = "Narrative removed."
 NEVER_SMOKER = ("266919005", "Never smoker")
 BODY_SITE = ("123037004", "Body structure")
 UNKNOWN_VALUE = ("261665006", "Unknown")
+OTHER_RACE = ("2131-1", "Other Race")
+NOT_HISPANIC = ("2186-5", "Not Hispanic or Latino")
 ORAL = ("C38288", "Oral")
 INTRAMUSCULAR = ("C28161", "Intramuscular")
 _HEADER = ("Name", "Code", "Date", "Value")
@@ -997,19 +1002,67 @@ class _Synthesizer:
         self.rng = random.Random(int.from_bytes(digest, "big"))
         self.report = report
         self.tokens: set[str] = set()
-        self.emitted: set[str] = {REMOVED, NARRATIVE_REMOVED, *_HEADER}
+        self.emitted: set[str] = {REMOVED, NARRATIVE_REMOVED, *_HEADER, *SUBSTITUTES}
         self.kept_codes: set[tuple[str | None, str]] = set()
         self.placed_ids: set[str] = set()
         self.height_cm: float | None = None
         self.weight_kg: float | None = None
 
     def run(self, root: etree._Element) -> None:
+        self._demographics(root)
+        self._specialties(root)
         sections = CdaDocument(root, "<synthesize>").sections()
         for section in sections:
             self._collect_tokens(section)
         for section in sections:
             self._rewrite_section(section)
         self._find_residuals(root)
+
+    # ---- header -------------------------------------------------------------------
+
+    def _demographics(self, root: etree._Element) -> None:
+        """Neutralize race, ethnicity, religion, marital status, gender and birth year."""
+        years = [y for v in _effective_times(root) if (y := _year(v)) is not None]
+        latest = max(years, default=None)
+        for patient in root.iterfind("c:recordTarget/c:patientRole/c:patient", namespaces=NSMAP):
+            for el in (*children(patient, "raceCode"), *children(patient, "raceCode", SDTC_NS)):
+                self._set_code(el, CDC_RACE, *OTHER_RACE)
+            for el in children(patient, "ethnicGroupCode"):
+                self._set_code(el, CDC_RACE, *NOT_HISPANIC)
+            for el in children(patient, "religiousAffiliationCode"):
+                for name in ("code", "codeSystem", "codeSystemName", "displayName"):
+                    el.attrib.pop(name, None)
+                el.set("nullFlavor", "UNK")
+            for el in children(patient, "maritalStatusCode"):
+                el.set("code", "U")
+                if el.get("displayName") is not None:
+                    el.set("displayName", self._emit("Unknown"))
+            gender = child(patient, "administrativeGenderCode")
+            if gender is not None and attr(gender, "code") is None:
+                gender.attrib.pop("nullFlavor", None)
+                gender.set("code", "UN")
+                gender.set("codeSystem", ADMINISTRATIVE_GENDER)
+                gender.set("displayName", self._emit("Undifferentiated"))
+                for ot in children(gender, "originalText"):
+                    gender.remove(ot)
+            birth = child(patient, "birthTime")
+            raw = attr(birth, "value")
+            if raw and len(raw) >= 4 and raw[:4].isdigit():
+                base = latest if latest is not None else int(raw[:4])
+                year = base - self.rng.randint(25, 70)
+                rest = "0101" + raw[8:] if len(raw) >= 8 else raw[4:]
+                birth.set("value", f"{year:04d}{rest}")
+
+    def _specialties(self, root: etree._Element) -> None:
+        """Keep provider specialty codes but drop their text and display names."""
+        for entity in root.iter(q("assignedEntity")):
+            code_el = child(entity, "code")
+            if code_el is None:
+                continue
+            self._set_original_text(code_el, REMOVED)
+            for el in (code_el, *children(code_el, "translation")):
+                if el.get("displayName") is not None:
+                    el.set("displayName", REMOVED)
 
     # ---- helpers ------------------------------------------------------------------
 
@@ -1819,6 +1872,20 @@ def _ref_id(ref: etree._Element | None) -> str | None:
     if not value:
         return None
     return value[1:] if value.startswith("#") else value
+
+
+def _effective_times(root: etree._Element) -> list[str]:
+    """Every TS value on an effectiveTime or one of its bounds."""
+    out: list[str] = []
+    for et in root.iter(q("effectiveTime")):
+        for el in (et, *et):
+            if isinstance(el.tag, str) and (raw := attr(el, "value")):
+                out.append(raw)
+    return out
+
+
+def _year(raw: str) -> int | None:
+    return int(raw[:4]) if len(raw) >= 8 and raw[:8].isdigit() else None
 
 
 def _date(el: etree._Element | None) -> str:

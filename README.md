@@ -108,13 +108,17 @@ What it changes:
   rounded to January 1 of its shifted year.
 - Every `<id>` extension (and any root that is not an OID) becomes a stable hash of the
   seed and the original value, so the same identifier still maps to the same output
-  everywhere in the document.
+  everywhere in the document. Runs of nine or more digits inside OID roots and narrative
+  `ID` attributes (Epic record numbers) are hashed too, with references following.
+- Epic customer OIDs (`1.2.840.114350.1.13.<customer>...`) get customer number `0` wherever
+  they appear; `assigningAuthorityName` values other than `EPIC`/`EPC` become `Example`.
 - The patient becomes Alex Testperson; everyone else (authors, performers, informants,
   guardians, custodians) becomes Pat Clinician at Example Health System, with a fixed
-  address and `tel:+1-555-0100` / `mailto:patient@example.com` telecoms.
-- Section narrative, titles, `originalText` and `displayName` values have the names seen in
-  the header replaced with the same substitutes, and phone numbers, email addresses and
-  `MRN: 12345` patterns are blanked.
+  address and `tel:+1-555-0100` / `mailto:patient@example.com` telecoms. A name or address
+  that carries a `nullFlavor` but still has content is replaced the same way.
+- Every text node in the document has the names seen in the header replaced with the same
+  substitutes; in section narrative, titles and `originalText`, phone numbers, email
+  addresses, `MRN: 12345` and `NPI: 1234567890` patterns are blanked as well.
 
 Codes, code systems, units, measurement values and the narrative tables are left as they
 are, so the converter produces the same resources from the scrubbed file as from the
@@ -150,8 +154,11 @@ What it keeps: every section, entry and element, in the same order; template ids
 hashed ids, status codes, mood codes, `nullFlavor` values, the shape of every
 `effectiveTime`, the generic codes that describe the record (section codes, concern acts,
 status and severity observations, vital sign and social history codes, encounter type
-codes), and the header as the anonymizer left it (gender, rounded birth date, language,
-document title, confidentiality).
+codes), and the header as the anonymizer left it (language, document title,
+confidentiality). Race and ethnicity become "Other Race" and "Not Hispanic or Latino",
+religion and marital status become unknown, a gender without a code becomes
+"Undifferentiated", the birth year is drawn 25 to 70 years before the latest date in the
+document, and provider specialty text is removed while the specialty codes stay.
 
 What it replaces: every medication (about 40 common drugs with RxNorm codes, doses, routes
 and sig text), every problem and encounter diagnosis (about 45 conditions with SNOMED CT and

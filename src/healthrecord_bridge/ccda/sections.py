@@ -94,6 +94,7 @@ KNOWN_UNMAPPED: dict[str, str] = {
     "81321-7": "Care Team",
     "85847-2": "Patient Notes",
     "34117-2": "History and Physical Note",
+    "X-CE-PFD": "Patient-facing Note",
 }
 
 

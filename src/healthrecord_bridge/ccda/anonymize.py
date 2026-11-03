@@ -19,7 +19,7 @@ from lxml import etree
 
 from .document import parse_xml
 from .ids import _OID_RE, _UUID_RE
-from .xml import HL7_NS, attr, local_name, q
+from .xml import HL7_NS, attr, findall, local_name, q
 
 PATIENT_GIVEN = "Alex"
 PATIENT_FAMILY = "Testperson"
@@ -35,15 +35,46 @@ ADDRESS = (
 )
 PHONE = "tel:+1-555-0100"
 EMAIL = "mailto:patient@example.com"
+AUTHORITY_NAME = "Example"
+EPIC_CUSTOMER_OID = "1.2.840.114350.1.13.0"
+NPI_REPLACEMENT = "0000000000"
+MRN_REPLACEMENT = "MRN: 00000"
+EMAIL_REPLACEMENT = "[email removed]"
+PHONE_REPLACEMENT = "555-0100"
+
+SUBSTITUTES: frozenset[str] = frozenset(
+    {
+        PATIENT_GIVEN,
+        PATIENT_FAMILY,
+        PERSON_GIVEN,
+        PERSON_FAMILY,
+        ORGANIZATION_NAME,
+        AUTHORITY_NAME,
+        *(v for _, v in ADDRESS),
+        PHONE,
+        EMAIL,
+        PHONE.split(":", 1)[1],
+        EMAIL.split(":", 1)[1],
+        NPI_REPLACEMENT,
+        MRN_REPLACEMENT,
+        EMAIL_REPLACEMENT,
+        PHONE_REPLACEMENT,
+    }
+)
+"""Every string the scrubber writes; residual checks never report these."""
 
 TS_ATTRIBUTES = frozenset({"value", "low", "high", "center", "time", "effectiveTime"})
 NAME_PARTS = ("prefix", "given", "family", "suffix")
 
 _TS_RE = re.compile(r"^(?P<date>\d{8})(?P<rest>\d*(?:\.\d+)?(?:[+-]\d{4})?)$")
-_PHONE_RE = re.compile(r"\(?\d{3}\)?[-. ]?\d{3}[-. ]\d{4}")
+_PHONE_RE = re.compile(r"(?<![\d.])\(?\d{3}\)?[-. ]?\d{3}[-. ]\d{4}(?!\.?\d)")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _MRN_RE = re.compile(r"\bMRN\s*[:#]?\s*[A-Za-z]{0,3}\d+", re.IGNORECASE)
+_NPI_RE = re.compile(r"\b(NPI\s*[:#]?\s*)\d{10}\b", re.IGNORECASE)
 _LONG_DIGITS_RE = re.compile(r"(?<![\d.])\d{9,}")
+_DIGIT_RUN_RE = re.compile(r"(?<!\d)\d{9,}(?!\d)")
+_EPIC_CUSTOMER_RE = re.compile(r"1\.2\.840\.114350\.1\.13\.\d+")
+_KEPT_AUTHORITIES = frozenset({"EPIC", "EPC"})
 _CODE_LABEL_RE = re.compile(
     r"(?:SNOMED(?:[- ]?CT)?|LOINC|RXNORM|CVX|CPT|NDC|HCPCS|ICD-?(?:9|10)(?:-CM)?)\s*[:#]?\s*$",
     re.IGNORECASE,
@@ -85,6 +116,8 @@ class AnonymizeReport:
 
     day_shift: int
     ids_rewritten: int = 0
+    oids_rewritten: int = 0
+    """Epic customer OIDs whose customer number became 0."""
     names_rewritten: int = 0
     telecoms_rewritten: int = 0
     addresses_rewritten: int = 0
@@ -99,6 +132,7 @@ class AnonymizeReport:
         """One line for a terminal."""
         return (
             f"day shift {self.day_shift:+d}, ids {self.ids_rewritten}, "
+            f"oids {self.oids_rewritten}, "
             f"names {self.names_rewritten}, telecoms {self.telecoms_rewritten}, "
             f"addresses {self.addresses_rewritten}, "
             f"narrative replacements {self.narrative_replacements}, "
@@ -158,6 +192,8 @@ class _Scrubber:
         self._collect_tokens(root)
         self._shift_dates(root)
         self._rewrite_ids(root)
+        self._rewrite_oids(root)
+        self._rewrite_authorities(root)
         self._rewrite_names(root)
         self._rewrite_addresses(root)
         self._rewrite_telecoms(root)
@@ -172,12 +208,18 @@ class _Scrubber:
     def _hash_uuid(self, original: str) -> str:
         return str(uuid.uuid5(uuid.NAMESPACE_OID, self.seed + original))
 
+    def _hash_digit_runs(self, original: str) -> str:
+        """Replace every run of 9 or more digits with 8 seeded digits."""
+        return _DIGIT_RUN_RE.sub(
+            lambda m: f"{int(self._hash(m.group(0)), 16) % 10**8:08d}", original
+        )
+
     # ---- tokens seen in the structured part ---------------------------------------
 
     def _collect_tokens(self, root: etree._Element) -> None:
         patient_role = root.find("c:recordTarget/c:patientRole", {"c": HL7_NS})
         if patient_role is not None:
-            for name_el in patient_role.iter(q("name")):
+            for name_el in findall(patient_role, "c:patient/c:name"):
                 self._collect_person(name_el, PATIENT_GIVEN, PATIENT_FAMILY)
             for id_el in patient_role.findall(q("id")):
                 ext = attr(id_el, "extension")
@@ -237,15 +279,70 @@ class _Scrubber:
             elif root_attr and not _OID_RE.match(root_attr):
                 el.set("root", self._hash(root_attr))
                 changed = True
+            elif root_attr and _DIGIT_RUN_RE.search(root_attr):
+                el.set("root", self._hash_digit_runs(root_attr))
+                changed = True
             if changed:
                 self.report.ids_rewritten += 1
+        self._rewrite_narrative_ids(root)
+
+    def _rewrite_narrative_ids(self, root: etree._Element) -> None:
+        """Hash long digit runs in narrative IDs, keeping the references that point at them."""
+        renamed: dict[str, str] = {}
+        for el in root.iter():
+            if not isinstance(el.tag, str):
+                continue
+            old = el.get("ID")
+            if old and _DIGIT_RUN_RE.search(old):
+                new = self._hash_digit_runs(old)
+                el.set("ID", new)
+                renamed[old] = new
+                self.report.ids_rewritten += 1
+        if not renamed:
+            return
+        for el in root.iter():
+            if not isinstance(el.tag, str):
+                continue
+            for name, value in el.attrib.items():
+                if etree.QName(name).localname not in {"value", "href"}:
+                    continue
+                hash_mark, target = ("#", value[1:]) if value.startswith("#") else ("", value)
+                if target in renamed:
+                    el.set(name, hash_mark + renamed[target])
+
+    def _rewrite_oids(self, root: etree._Element) -> None:
+        """Replace the customer number in Epic OIDs, in attributes and text alike."""
+
+        def sub(value: str) -> str:
+            new, k = _EPIC_CUSTOMER_RE.subn(EPIC_CUSTOMER_OID, value)
+            self.report.oids_rewritten += k
+            return new
+
+        for el in root.iter():
+            if not isinstance(el.tag, str):
+                continue
+            for name, value in el.attrib.items():
+                if "114350" in value:
+                    el.set(name, sub(value))
+            if el.text and "114350" in el.text:
+                el.text = sub(el.text)
+            if el.tail and "114350" in el.tail:
+                el.tail = sub(el.tail)
+
+    def _rewrite_authorities(self, root: etree._Element) -> None:
+        for el in root.iter():
+            if not isinstance(el.tag, str):
+                continue
+            value = el.get("assigningAuthorityName")
+            if value and value.strip().upper() not in _KEPT_AUTHORITIES:
+                el.set("assigningAuthorityName", AUTHORITY_NAME)
 
     # ---- names, addresses, telecoms ---------------------------------------------------
 
     def _rewrite_names(self, root: etree._Element) -> None:
         for name_el in list(root.iter(q("name"))):
             kind = _name_kind(name_el)
-            if kind is None or attr(name_el, "nullFlavor"):
+            if kind is None or _is_empty(name_el):
                 continue
             if kind == "organization":
                 if _flat_text(name_el) == ORGANIZATION_NAME:
@@ -265,7 +362,7 @@ class _Scrubber:
 
     def _rewrite_addresses(self, root: etree._Element) -> None:
         for addr_el in root.iter(q("addr")):
-            if attr(addr_el, "nullFlavor") or (len(addr_el) == 0 and not _flat_text(addr_el)):
+            if _is_empty(addr_el):
                 continue
             _clear(addr_el)
             for local, value in ADDRESS:
@@ -299,20 +396,34 @@ class _Scrubber:
                 n += k
                 if k:
                     text = re.sub(r" {2,}", " ", re.sub(r" ,", ",", text))
-            text, k = _EMAIL_RE.subn("[email removed]", text)
+            text, k = _EMAIL_RE.subn(EMAIL_REPLACEMENT, text)
             n += k
-            text, k = _PHONE_RE.subn("555-0100", text)
+            text, k = _PHONE_RE.subn(PHONE_REPLACEMENT, text)
             n += k
-            text, k = _MRN_RE.subn("MRN: 00000", text)
+            text, k = _MRN_RE.subn(MRN_REPLACEMENT, text)
+            n += k
+            text, k = _NPI_RE.subn(rf"\g<1>{NPI_REPLACEMENT}", text)
             n += k
             self.report.narrative_replacements += n
             return text
 
-        for el in _text_nodes(root):
+        def scrub_tokens(text: str) -> str:
+            if token_re is None:
+                return text
+            text, k = token_re.subn(lambda m: tokens[m.group(0).lower()], text)
+            self.report.narrative_replacements += k
+            return text
+
+        narrative = list(_text_nodes(root))
+        narrative_ids = {id(el) for el in narrative}
+        for el in root.iter():
+            if not isinstance(el.tag, str):
+                continue
+            fn = scrub if id(el) in narrative_ids else scrub_tokens
             if el.text:
-                el.text = scrub(el.text)
+                el.text = fn(el.text)
             if el.tail:
-                el.tail = scrub(el.tail)
+                el.tail = fn(el.tail)
         if token_re is not None:
             for el in root.iter():
                 if not isinstance(el.tag, str):
@@ -333,6 +444,8 @@ class _Scrubber:
                     continue
                 for label, pattern in checks:
                     for m in pattern.finditer(text):
+                        if m.group(0) in SUBSTITUTES:
+                            continue
                         if label == "digit run" and (
                             m.group(0) in codes or _CODE_LABEL_RE.search(text[: m.start()])
                         ):
@@ -365,6 +478,10 @@ def _name_kind(name_el: etree._Element) -> str | None:
     if local in _ORGANIZATION_PARENTS:
         return "organization"
     return None
+
+
+def _is_empty(el: etree._Element) -> bool:
+    return len(el) == 0 and not _flat_text(el)
 
 
 def _clear(el: etree._Element) -> None:
