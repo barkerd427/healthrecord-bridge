@@ -23,6 +23,17 @@ orders with route and frequency, lab reference ranges and interpretation codes, 
 locations and performers, immunization lot numbers and refusals, and a populated Social
 History section. Every name, identifier, address and value is fictional.
 
+## epic/
+
+`mychart_epic_synthetic.xml` is a real Epic MyChart "Download my record" document whose
+identity, demographics, identifiers, Epic customer OIDs and all clinical content were replaced
+by `hrb synthesize`, run twice with seeds that are not published. Only Epic's structure
+remains: its section set and order, entry templates, organizers, narrative references and
+Epic-local code systems. Every name, id, date and clinical value in it is made up. See
+`epic/README.md`. It is tested on its own in `test_epic_fixture.py` rather than through the
+shared fixture list, because Epic reuses ids across result observations and leaves some
+organizers without a codable observation, which the generic count checks do not allow for.
+
 ## xdm/
 
 `mychart_export_letha284.zip` wraps one of the Synthea documents in the IHE XDM folder layout
