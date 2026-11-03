@@ -135,6 +135,57 @@ report = anonymize_file("DOC0001.XML", "fixture.xml", seed="my-seed")
 print(report.day_shift, report.residual_findings)
 ```
 
+## Making a synthetic fixture from a real export
+
+Anonymizing keeps the clinical content, which is often enough to identify a person on its
+own. `hrb synthesize` goes one step further: it runs the anonymizer and then replaces every
+piece of clinical content with made-up data from built-in tables, so what is left is the
+shape of the export and nothing else:
+
+```sh
+hrb synthesize DOC0001.XML fixture.xml --seed my-seed --report synthesize.json
+```
+
+What it keeps: every section, entry and element, in the same order; template ids,
+hashed ids, status codes, mood codes, `nullFlavor` values, the shape of every
+`effectiveTime`, the generic codes that describe the record (section codes, concern acts,
+status and severity observations, vital sign and social history codes, encounter type
+codes), and the header as the anonymizer left it (gender, rounded birth date, language,
+document title, confidentiality).
+
+What it replaces: every medication (about 40 common drugs with RxNorm codes, doses, routes
+and sig text), every problem and encounter diagnosis (about 45 conditions with SNOMED CT and
+ICD-10-CM codes), allergens with their reactions and severities, immunizations (CVX codes;
+lot numbers are hashed and manufacturers blanked), procedures (CPT or SNOMED CT), lab panels
+and results (about 45 LOINC tests; every value is drawn inside its normal range and the
+reference range and interpretation are rewritten to match), vital sign values (plausible,
+with a constant height and a weight that stays within a small band), smoking status (always
+"Never smoker"), and every free-text field. Each section's narrative is rebuilt as a plain
+table with one row per entry, keeping the `ID` attributes that entries point at.
+Text-only sections (plan of care, notes, history of present illness, payers, family history
+and so on) are reduced to "Narrative removed." with "Removed" in place of their entry text
+and hashed codes; sections the converter does not recognise get the same treatment and are
+listed in the report under `unrecognized_sections`.
+
+All choices come from a generator seeded with `--seed`, so the same seed gives
+byte-identical output; without a seed a random one is used and printed. Nothing leaves your
+machine: there is no network access and no model involved. The converter produces the same
+number of resources of each type from the synthetic file as from the original.
+
+The output is still worth a read before you share it. After rewriting, the tool checks that
+no text in the document still contains any display name, narrative cell, drug name or free
+text it collected from the input and lists anything that slipped through under
+`residual_findings`; the command warns on stderr when that list, or the list of
+unrecognized sections, is not empty.
+
+```python
+from healthrecord_bridge.ccda.synthesize import synthesize, synthesize_file
+
+synthetic, report = synthesize(xml_bytes, seed="my-seed")
+report = synthesize_file("DOC0001.XML", "fixture.xml", seed="my-seed")
+print(report.summary(), report.entries_replaced, report.unrecognized_sections)
+```
+
 ## Input formats
 
 - A bare C-CDA XML file. The root element must be `{urn:hl7-org:v3}ClinicalDocument`.

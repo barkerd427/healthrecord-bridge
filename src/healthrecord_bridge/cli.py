@@ -12,6 +12,7 @@ from pathlib import Path
 from . import __version__
 from .ccda import CcdaError, convert_many
 from .ccda.anonymize import anonymize_file
+from .ccda.synthesize import synthesize_file
 from .fhir.ndjson import write_ndjson
 
 
@@ -60,6 +61,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--report", metavar="report.json", help="write the anonymize report as JSON")
     a.set_defaults(func=cmd_anonymize)
+
+    s = sub.add_parser(
+        "synthesize",
+        help="anonymize a C-CDA XML file and replace its clinical content with made-up data",
+    )
+    s.add_argument("input", metavar="INPUT", help="C-CDA XML file")
+    s.add_argument("output", metavar="OUTPUT", help="where to write the synthetic XML")
+    s.add_argument(
+        "--seed",
+        metavar="SEED",
+        help="seed for the anonymizer and every choice (same seed, same output; default: random)",
+    )
+    s.add_argument("--report", metavar="report.json", help="write the synthesize report as JSON")
+    s.set_defaults(func=cmd_synthesize)
     return parser
 
 
@@ -101,6 +116,41 @@ def cmd_anonymize(args: argparse.Namespace) -> int:
             json.dump(report.to_dict(), fh, indent=2)
             fh.write("\n")
     print(f"{args.output}: {report.summary()} (seed {seed})")
+    if report.residual_findings:
+        print(
+            f"hrb: warning: {len(report.residual_findings)} residual findings; "
+            "read the output before sharing it",
+            file=sys.stderr,
+        )
+        for finding in report.residual_findings:
+            print(f"  {finding}", file=sys.stderr)
+    return 0
+
+
+def cmd_synthesize(args: argparse.Namespace) -> int:
+    seed = args.seed if args.seed is not None else secrets.token_hex(8)
+    try:
+        report = synthesize_file(Path(args.input), Path(args.output), seed=seed)
+    except (CcdaError, FileNotFoundError, ValueError, OSError) as exc:
+        print(f"hrb: error: {exc}", file=sys.stderr)
+        return 1
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump(report.to_dict(), fh, indent=2)
+            fh.write("\n")
+    print(f"{args.output}: {report.summary()} (seed {seed})")
+    if report.unrecognized_sections:
+        print(
+            f"hrb: warning: {len(report.unrecognized_sections)} unrecognized sections were "
+            "blanked wholesale",
+            file=sys.stderr,
+        )
+        for section in report.unrecognized_sections:
+            print(
+                f"  {section['code'] or '(no code)'} {section['title'] or ''} "
+                f"({section['entries']} entries)",
+                file=sys.stderr,
+            )
     if report.residual_findings:
         print(
             f"hrb: warning: {len(report.residual_findings)} residual findings; "

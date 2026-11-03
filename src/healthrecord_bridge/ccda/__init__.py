@@ -26,6 +26,7 @@ from .header import map_custodian, map_document_reference, map_patient, map_prov
 from .ids import NAMESPACE_HRB
 from .report import ConversionReport, DocumentReport, SectionReport, UnknownSection
 from .sections import KNOWN_UNMAPPED, find_spec
+from .synthesize import SynthesizeReport, synthesize, synthesize_file
 
 __all__ = [
     "NAMESPACE_HRB",
@@ -35,6 +36,7 @@ __all__ = [
     "DocumentReport",
     "NoDocumentsFoundError",
     "NotClinicalDocumentError",
+    "SynthesizeReport",
     "UnsafeXmlError",
     "anonymize",
     "anonymize_file",
@@ -42,6 +44,8 @@ __all__ = [
     "convert_bytes",
     "convert_document",
     "convert_many",
+    "synthesize",
+    "synthesize_file",
 ]
 
 

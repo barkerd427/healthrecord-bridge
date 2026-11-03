@@ -4,6 +4,18 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - Unreleased
+
+### Added
+
+- C-CDA synthesizer (`hrb synthesize`, `healthrecord_bridge.ccda.synthesize`): runs the
+  anonymizer, then replaces every medication, problem, allergy, immunization, procedure,
+  lab result, vital sign value, social history value and free-text field with made-up data
+  from built-in tables, deterministically from a seed. Narratives are rebuilt as plain
+  tables that keep the `ID` attributes entries point at; text-only and unrecognised
+  sections are blanked. `SynthesizeReport` carries the anonymize report, entry counts per
+  section, unrecognized sections and residual findings.
+
 ## [0.1.0] - 2026-11-02
 
 ### Added
