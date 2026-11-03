@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 
 from conftest import HANDWRITTEN, SYNTHEA, by_type
 from healthrecord_bridge.ccda import NAMESPACE_HRB, convert, convert_many
@@ -23,6 +24,10 @@ def test_resource_id_formula():
         uuid.uuid5(NAMESPACE_HRB, "Observation|1.2.3|")
     )
     assert resource_id("Condition", cid) != resource_id("Observation", cid)
+    assert resource_id("Observation", cid, "30954-2", 10, 48) == str(
+        uuid.uuid5(NAMESPACE_HRB, "Observation|1.2.3|ABC|@30954-2|10|48")
+    )
+    assert resource_id("Observation", cid, "30954-2", 10, 48) != resource_id("Observation", cid)
     doc = CdaId("9.9", "DOC")
     assert fallback_id("Observation", doc, "29762-2", 1, 0) == str(
         uuid.uuid5(NAMESPACE_HRB, "Observation|9.9|DOC|29762-2|1|0")
@@ -50,9 +55,13 @@ def test_ids_are_deterministic_across_runs(fixture_path):
     assert first == second
     ids = [e["resource"]["id"] for e in first["entry"]]
     assert len(ids) == len(set(ids)), "ids must be unique within a bundle"
-    for e in first["entry"]:
-        r = e["resource"]
-        if "identifier" in r:
+    resources = [e["resource"] for e in first["entry"]]
+    # Epic reuses one CDA id on several observations; only the first keeps the plain id.
+    seen = Counter(
+        (r["resourceType"], str(r["identifier"][0])) for r in resources if "identifier" in r
+    )
+    for r in resources:
+        if "identifier" in r and seen[(r["resourceType"], str(r["identifier"][0]))] == 1:
             cid = r["identifier"][0]
             if cid["system"] == "urn:ietf:rfc:3986":
                 root = cid["value"].split(":", 2)[2]

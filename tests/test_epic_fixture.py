@@ -17,6 +17,7 @@ from lxml import etree
 from conftest import EPIC, NS, by_type, component_observation_counts, section_entry_counts
 from healthrecord_bridge.ccda import convert, convert_bytes
 from healthrecord_bridge.ccda.document import CdaDocument
+from healthrecord_bridge.ccda.ids import CdaId, resource_id
 from healthrecord_bridge.ccda.sections import KNOWN_UNMAPPED
 from healthrecord_bridge.cli import main
 
@@ -26,6 +27,7 @@ NDDF = "urn:oid:2.16.840.1.113883.6.208"
 EPIC_EAP = "urn:oid:1.2.840.114350.1.13.0.2.7.2.696580"
 EPIC_LRR = "urn:oid:1.2.840.114350.1.13.0.2.7.2.768282"
 EPIC_RESULT_TEXT = "urn:oid:1.2.840.114350.1.72.1.5220"
+EPIC_OBS_ROOT = "1.2.840.114350.1.13.0.2.7.3.696580.52175"
 IMO_PROBLEM_IT = "urn:oid:2.16.840.1.113883.3.247.1.1"
 EPIC_CUSTOMER = re.compile(r"1\.2\.840\.114350\.1\.13\.(\d+)")
 
@@ -36,7 +38,7 @@ EXPECTED_COUNTS = {
     "DocumentReference": 1,
     "Immunization": 1,
     "MedicationRequest": 5,
-    "Observation": 150,
+    "Observation": 151,
     "Organization": 1,
     "Patient": 1,
     "Procedure": 4,
@@ -219,26 +221,34 @@ def test_results_become_reports_and_observations(converted):
         systems = [c["system"] for c in dr["code"]["coding"]]
         assert systems[-1] == EPIC_EAP
     assert sum(1 for dr in reports if "performer" in dr) == 9
-    assert reports[0]["code"]["coding"][0] == {"system": "http://loinc.org", "code": "58410-2"}
+    assert reports[0]["code"]["coding"][0] == {"system": "http://loinc.org", "code": "24323-8"}
+    assert reports[0]["code"]["text"] == "Comprehensive metabolic 2000 panel - Serum or Plasma"
     assert "effectivePeriod" in reports[0]
     # Three text-only reports have a null organizer code and keep just the Epic order id.
     assert [dr["code"]["coding"][0]["system"] for dr in reports[4:7]] == [EPIC_EAP] * 3
     systems = Counter(tuple(c["system"] for c in o["code"]["coding"]) for o in lab)
-    assert systems == {(EPIC_LRR,): 109, ("http://loinc.org",): 18, (EPIC_RESULT_TEXT,): 6}
+    assert systems == {(EPIC_LRR,): 109, ("http://loinc.org",): 19, (EPIC_RESULT_TEXT,): 6}
     values = Counter(next((k for k in o if k.startswith("value")), "none") for o in lab)
     assert values["valueQuantity"] == 119
+    # Six ED values reference a narrative block and come through as strings.
+    assert values["valueString"] == 6
+    text_only = [o for o in lab if o["code"]["coding"][0]["system"] == EPIC_RESULT_TEXT]
+    assert all("valueString" in o for o in text_only)
     absent = sum(1 for o in lab if "dataAbsentReason" in o)
-    assert absent == 8
-    # Six ED values that only reference a narrative block are dropped.
-    assert values["none"] - absent == 6
+    assert absent == 9
+    assert values["none"] == absent
+    # Null LOINC codes keep the narrative name as text next to the Epic-local translation.
+    null_coded = [o for o in lab if o["code"]["coding"][0]["system"] == EPIC_LRR]
+    assert all(o["code"]["coding"][0]["display"] == "Removed" for o in null_coded)
+    assert all(o["code"]["text"] for o in null_coded)
     assert sum(1 for o in lab if "referenceRange" in o) == 69
     assert all("interpretation" not in o for o in lab)
     ranged = next(o for o in lab if "referenceRange" in o)
     assert ranged["referenceRange"][0]["text"]
 
 
-def test_component_ids_reused_by_epic_collapse_to_one_resource(converted, root):
-    """Epic reuses CDA ids across result observations; the converter keys resource ids on them."""
+def test_component_ids_reused_by_epic_stay_distinct(converted, root):
+    """Epic reuses CDA ids across result observations; each still gets its own resource."""
     bundle, report = converted
     ids = Counter(
         (i.get("root"), i.get("extension"))
@@ -248,13 +258,41 @@ def test_component_ids_reused_by_epic_collapse_to_one_resource(converted, root):
     )
     duplicated = sorted(ext for (_, ext), n in ids.items() if n > 1)
     assert len(duplicated) == 5
-    organizer_ids = {
-        o.find("c:id", NS).get("extension")
-        for o in section(root, "30954-2").iterfind("c:entry/c:organizer", NS)
-    }
+    organizers = section(root, "30954-2").findall("c:entry/c:organizer", NS)
+    organizer_ids = {o.find("c:id", NS).get("extension") for o in organizers}
     assert len(set(duplicated) & organizer_ids) == 4
-    observed = len(by_type(bundle)["Observation"])
-    assert report.resource_counts["Observation"] == observed + 1
+    types = by_type(bundle)
+    assert report.resource_counts == {k: len(v) for k, v in types.items()}
+    resource_ids = [e["resource"]["id"] for e in bundle["entry"]]
+    assert len(resource_ids) == len(set(resource_ids))
+    by_id = {o["id"]: o for o in types["Observation"]}
+    reports = iter(types["DiagnosticReport"])
+    for organizer in organizers:
+        expected = []
+        for obs in organizer.findall("c:component/c:observation", NS):
+            code = obs.find("c:code", NS)
+            codes = [code.get("code"), *(t.get("code") for t in code.findall("c:translation", NS))]
+            if any(codes):
+                expected.append(next(c for c in codes if c))
+        if not expected:
+            continue
+        dr = next(reports)
+        got = [
+            by_id[r["reference"].split("/")[1]]["code"]["coding"][0]["code"] for r in dr["result"]
+        ]
+        assert got == expected
+    # One id sits on two LOINC-coded observations in different organizers.
+    ext = next(ext for (root_oid, ext), n in ids.items() if n > 1 and root_oid == EPIC_OBS_ROOT)
+    shared = [o for o in types["Observation"] if o["identifier"][0]["value"] == ext]
+    placed = [(9, 30), (10, 48)]
+    assert [o["code"]["coding"][0]["code"] for o in shared] == [
+        organizers[i].findall("c:component/c:observation", NS)[j].find("c:code", NS).get("code")
+        for i, j in placed
+    ]
+    assert shared[0]["id"] == resource_id("Observation", CdaId(EPIC_OBS_ROOT, ext))
+    assert shared[1]["id"] == resource_id(
+        "Observation", CdaId(EPIC_OBS_ROOT, ext), "30954-2", 10, 48
+    )
 
 
 def test_medications_keep_rxnorm_and_translations(converted, root):
@@ -278,12 +316,12 @@ def test_medications_keep_rxnorm_and_translations(converted, root):
         assert [c["system"] for c in concept["coding"]] == [RXNORM, NDC, NDDF]
         assert concept["text"].endswith(("Tablet", "Capsule"))
         assert m["status"] == "active" and m["intent"] == "plan"
-        assert m["authoredOn"].startswith("2026-02-12T")
+        assert m["authoredOn"].startswith("2026-07-10T")
         dosage = m["dosageInstruction"][0]
         assert dosage["text"].startswith("Take 1 tablet by mouth")
         assert dosage["route"]["coding"][0]["code"] == "C38288"
         assert dosage["timing"]["repeat"]["periodUnit"] == "d"
-    assert meds[0]["medicationCodeableConcept"]["text"] == "levothyroxine sodium 0.1 MG Oral Tablet"
+    assert meds[0]["medicationCodeableConcept"]["text"] == "atorvastatin 80 MG Oral Tablet"
     assert "2.16.840.1.113883.6.208" in report.unmapped_code_systems
     assert "2.16.840.1.113883.6.69" not in report.unmapped_code_systems
 
@@ -293,14 +331,9 @@ def test_narrative_references_resolve(root):
     assert len(ids) == 315 and len(refs) == NARRATIVE_REFS
     assert all(ref.lstrip("#") in ids for ref in refs)
     doc = CdaDocument.from_path(EPIC)
-    resolved = [ref for ref in refs if doc.narrative.resolve(ref)]
-    # The synthesizer keeps every ID but leaves 143 of them on empty content placeholders.
-    assert len(resolved) == 198
-    assert doc.narrative.resolve("#med5") == "levothyroxine sodium 0.1 MG Oral Tablet"
-    assert (
-        doc.narrative.resolve("#sig5")
-        == "Take 1 tablet by mouth every morning on an empty stomach."
-    )
+    assert all(doc.narrative.resolve(ref) for ref in refs)
+    assert doc.narrative.resolve("#med5") == "atorvastatin 80 MG Oral Tablet"
+    assert doc.narrative.resolve("#sig5") == "Take 1 tablet by mouth at bedtime."
     assert doc.narrative.resolve("#nof3") == "No known allergies"
     # Epic builds result narrative ids out of its own OIDs; the customer number is 0 there too.
     result_refs = [r for r in refs if r.startswith("#Result.")]
@@ -347,7 +380,9 @@ def test_other_sections_map_epic_shapes(converted, root):
     assert allergy["note"] == [{"text": "No known allergies"}]
     imm = types["Immunization"][0]
     assert imm["status"] == "not-done"
+    # Epic codes the refused vaccine only by a SNOMED translation under a null code.
     assert imm["vaccineCode"]["coding"][0]["system"] == "http://snomed.info/sct"
+    assert imm["vaccineCode"]["coding"][0]["display"] == "Removed"
     for cond in types["Condition"]:
         systems = [c["system"] for c in cond["code"]["coding"]]
         assert systems == [
@@ -359,7 +394,7 @@ def test_other_sections_map_epic_shapes(converted, root):
         assert cond["clinicalStatus"]["coding"][0]["code"] == "active"
     procedures = types["Procedure"]
     assert all(p["status"] == "completed" and p["reasonCode"] for p in procedures)
-    assert procedures[0]["code"]["text"] == "SNOMED CT 52734007"
+    assert procedures[0]["code"]["text"] == "SNOMED CT 609588000"
     assert section(root, "46264-8").find("c:entry", NS) is None
 
 
@@ -370,8 +405,7 @@ def _same_structure(out: Path) -> None:
     ids, refs = narrative_ids_and_refs(etree.parse(str(out)).getroot())
     assert len(refs) == NARRATIVE_REFS and all(ref.lstrip("#") in ids for ref in refs)
     _, report = convert_bytes(out.read_bytes(), out.name)
-    counts = dict(EXPECTED_COUNTS, Observation=EXPECTED_COUNTS["Observation"] + 1)
-    assert report.resource_counts == counts
+    assert report.resource_counts == EXPECTED_COUNTS
 
 
 def test_cli_anonymize_is_idempotent(tmp_path, capsys):

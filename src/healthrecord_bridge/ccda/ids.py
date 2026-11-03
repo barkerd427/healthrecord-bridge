@@ -42,9 +42,16 @@ def _urn_prefix(root: str) -> str:
     return ""
 
 
-def resource_id(resource_type: str, cda_id: CdaId) -> str:
-    """Deterministic id: ``uuid5(NAMESPACE_HRB, "<resourceType>|<root>|<extension>")``."""
+def resource_id(resource_type: str, cda_id: CdaId, *discriminator: str | int) -> str:
+    """Deterministic id: ``uuid5(NAMESPACE_HRB, "<resourceType>|<root>|<extension>")``.
+
+    ``discriminator`` parts (section code and ordinals, or an element path) are
+    appended after an ``@`` marker when a document reuses one CDA id for several
+    elements, so each of them still gets a stable id of its own.
+    """
     key = f"{resource_type}|{cda_id.root}|{cda_id.extension or ''}"
+    if discriminator:
+        key += "|@" + "|".join(str(p) for p in discriminator)
     return str(uuid.uuid5(NAMESPACE_HRB, key))
 
 

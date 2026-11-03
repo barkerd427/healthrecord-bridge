@@ -35,6 +35,20 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- Converter: a CDA id reused on several elements of one document (Epic puts an organizer's id
+  on a component observation and shares ids between result observations) no longer collapses
+  them into one resource. The first element keeps the plain id; later ones add the section
+  code and ordinals, so ids stay deterministic and `DiagnosticReport.result` references point
+  at the right observation.
+- Converter: `ED` result values that reference the narrative become `valueString`, or
+  `dataAbsentReason` `unknown` when the referenced block is empty.
+- Converter: `CodeableConcept.text` is always set from `originalText`, so a lab coded only by
+  an Epic-local translation under a null LOINC code keeps its narrative name.
+- Converter: LOINC 85847-2 is listed as "Patient Care team information".
+- Synthesizer: a translation takes the same table row as its primary code (ICD-10-CM for
+  conditions, SNOMED CT for CPT procedures) or a hashed local code, instead of a code from
+  another table; the free-text sig code is kept; narrative IDs with no cell of their own go on
+  a `content` element that holds the entry's name rather than an empty one.
 - Anonymizer and synthesizer residual checks no longer report the scrubber's own
   substitutes (Alex, Testperson, Example Health System, ...), so a fully scrubbed document
   reports zero findings.

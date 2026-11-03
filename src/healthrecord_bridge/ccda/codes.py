@@ -139,8 +139,8 @@ def codeable_concept(
     ``translation`` children become additional codings (duplicates of the
     primary coding are dropped). ``originalText`` is carried to ``text``, either
     inline or by resolving a ``<reference value="#id"/>`` into the section
-    narrative. When no display name exists anywhere, ``text`` is the only way
-    the concept stays readable, so it is always attempted.
+    narrative, whether or not a coding has a display: with a null primary code
+    and local translations it is the only readable name.
     """
     if el is None:
         return None
@@ -158,7 +158,7 @@ def codeable_concept(
     out: dict = {}
     if codings:
         out["coding"] = codings
-    if text and not any("display" in c for c in codings):
+    if text:
         out["text"] = text
     return out
 

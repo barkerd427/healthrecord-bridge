@@ -27,12 +27,12 @@ History section. Every name, identifier, address and value is fictional.
 
 `mychart_epic_synthetic.xml` is a real Epic MyChart "Download my record" document whose
 identity, demographics, identifiers, Epic customer OIDs and all clinical content were replaced
-by `hrb synthesize`, run twice with seeds that are not published. Only Epic's structure
+by `hrb synthesize`, run three times with seeds that are not published. Only Epic's structure
 remains: its section set and order, entry templates, organizers, narrative references and
 Epic-local code systems. Every name, id, date and clinical value in it is made up. See
-`epic/README.md`. It is tested on its own in `test_epic_fixture.py` rather than through the
-shared fixture list, because Epic reuses ids across result observations and leaves some
-organizers without a codable observation, which the generic count checks do not allow for.
+`epic/README.md`. It is in the shared fixture list and tested in detail in
+`test_epic_fixture.py`; the shared entry-count check skips it, because Epic leaves some
+result observations with a null code and no text, which the converter drops.
 
 ## xdm/
 

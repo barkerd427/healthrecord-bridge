@@ -865,6 +865,7 @@ GENERIC_CODES = frozenset(
         "248536006",
         "373930000",
         "33999-4",
+        "76662-6",
         "82606-5",
         "75323-6",
         "75326-9",
@@ -1112,6 +1113,21 @@ class _Synthesizer:
                 del el.attrib["codeSystemName"]
         self.kept_codes.add((system, code))
         self.emitted.add(display)
+        self._set_translations(el, system, code, display, alternates)
+
+    def _set_translations(
+        self,
+        el: etree._Element | None,
+        system: str,
+        code: str,
+        display: str,
+        alternates: dict[str, tuple[str, str]] | None = None,
+    ) -> None:
+        """Translations take the same table row as the primary code, or a hashed code.
+
+        A translation in a system the row has nothing for is hashed rather than
+        drawn from another table, so a vaccine never gains a procedure code.
+        """
         for tr in children(el, "translation"):
             tsys = attr(tr, "codeSystem")
             if attr(tr, "code") is None:
@@ -1120,6 +1136,8 @@ class _Synthesizer:
                 self._set_code(tr, tsys, *alternates[tsys])
             elif tsys == system or tsys is None:
                 self._set_code(tr, system, code, display)
+            else:
+                self._hash_code(tr)
 
     def _hash_code(self, el: etree._Element) -> None:
         code = attr(el, "code") or ""
@@ -1351,6 +1369,8 @@ class _Synthesizer:
             if code_el is not None and attr(code_el, "code") is not None:
                 self._set_code(code_el, RXNORM, rxcui, display)
                 name_id = self._set_original_text(code_el, display)
+            else:
+                self._set_translations(code_el, RXNORM, rxcui, display)
             name_el = child(material, "name")
             if name_el is not None and text_of(name_el):
                 _set_plain_text(name_el, self._emit(display))
@@ -1464,6 +1484,8 @@ class _Synthesizer:
             if code_el is not None and attr(code_el, "code") is not None:
                 self._set_code(code_el, CVX, cvx, display)
                 name_id = self._set_original_text(code_el, display)
+            else:
+                self._set_translations(code_el, CVX, cvx, display)
             name_el = child(material, "name")
             if name_el is not None and text_of(name_el):
                 _set_plain_text(name_el, self._emit(display))
@@ -1585,6 +1607,8 @@ class _Synthesizer:
         if code_el is not None and attr(code_el, "code") is not None:
             self._set_code(code_el, LOINC, loinc, display)
             ot_id = self._set_original_text(code_el, display)
+        else:
+            self._set_translations(code_el, LOINC, loinc, display)
         self.emitted.add(display)
         text_id = self._set_text(obs, display)
         for ic in children(obs, "interpretationCode"):
@@ -1782,7 +1806,9 @@ class _Synthesizer:
                     self._place(td, rid)
             for rid in row.extra:
                 if rid not in self.placed_ids and td is not None:
-                    self._place(etree.SubElement(td, q("content")), rid)
+                    content = etree.SubElement(td, q("content"))
+                    content.text = row.cells[0] or REMOVED
+                    self._place(content, rid)
         etree.indent(text_el, space="  ")
 
     def _place(self, el: etree._Element, rid: str) -> None:

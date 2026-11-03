@@ -11,7 +11,7 @@ HANDWRITTEN = FIXTURES / "handwritten" / "mychart_like_ccd.xml"
 EPIC = FIXTURES / "epic" / "mychart_epic_synthetic.xml"
 XDM_ZIP = FIXTURES / "xdm" / "mychart_export_letha284.zip"
 XDM_SOURCE_XML = FIXTURES / "synthea" / "Letha284_Haag279_b9a32653-9fde-401f-bb32-9932e680c456.xml"
-ALL_XML = [*SYNTHEA, HANDWRITTEN]
+ALL_XML = [*SYNTHEA, HANDWRITTEN, EPIC]
 
 NS = {"c": "urn:hl7-org:v3"}
 

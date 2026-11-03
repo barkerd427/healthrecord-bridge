@@ -392,6 +392,80 @@ def test_specialty_text_is_removed_and_codes_kept():
     assert report.residual_findings == []
 
 
+VACCINE_150 = b'<code code="150" codeSystem="2.16.840.1.113883.12.292"'
+SNOMED_TRANSLATION = (
+    b'<translation code="415070008" codeSystem="2.16.840.1.113883.6.96"'
+    b' displayName="Percutaneous coronary intervention"/>'
+)
+SIG = (
+    b'<entryRelationship typeCode="SUBJ" inversionInd="true">'
+    b'<substanceAdministration classCode="SBADM" moodCode="INT">'
+    b'<templateId root="2.16.840.1.113883.10.20.22.4.147"/>'
+    b'<code code="76662-6" codeSystem="2.16.840.1.113883.6.1"'
+    b' displayName="Medication Instructions"/>'
+    b"<text>Take with food.</text><consumable><manufacturedProduct>"
+    b'<manufacturedLabeledDrug nullFlavor="NA"/></manufacturedProduct></consumable>'
+    b"</substanceAdministration></entryRelationship></substanceAdministration>"
+)
+
+
+def vaccine_code(root: etree._Element) -> etree._Element:
+    path = ".//c:section[c:code/@code='11369-6']//c:manufacturedMaterial/c:code"
+    return root.xpath(path, namespaces=NS)[0]
+
+
+def test_translations_follow_the_primary_code_or_are_hashed():
+    data = HANDWRITTEN.read_bytes()
+    start = data.index(VACCINE_150)
+    end = data.index(b"/>", start)
+    data = data[:end] + b">" + SNOMED_TRANSLATION + b"</code>" + data[end + 2 :]
+    out, report = synthesize(data, seed="s")
+    assert report.residual_findings == []
+    root = etree.fromstring(out)
+    vaccine = vaccine_code(root)
+    assert vaccine.get("codeSystem") == "2.16.840.1.113883.12.292"
+    translation = vaccine.find("c:translation", NS)
+    assert translation.get("codeSystem") == "2.16.840.1.113883.6.96"
+    assert len(translation.get("code")) == 12 and translation.get("displayName") == "Removed"
+    assert b"Percutaneous" not in out
+    path = ".//c:section[c:code/@code='47519-4']//c:procedure/c:code"
+    procedure = root.xpath(path, namespaces=NS)[0]
+    cpt = procedure.get("code")
+    snomed = procedure.find("c:translation[@codeSystem='2.16.840.1.113883.6.96']", NS)
+    assert (cpt, snomed.get("code"), snomed.get("displayName")) in PROCEDURES
+    assert snomed.get("displayName") == procedure.get("displayName")
+
+
+def test_null_vaccine_code_hashes_its_translation_and_keeps_sig_code():
+    data = HANDWRITTEN.read_bytes()
+    start = data.index(VACCINE_150)
+    end = data.index(b"/>", start) + 2
+    null_code = b'<code nullFlavor="OTH">' + SNOMED_TRANSLATION + b"</code>"
+    data = data[:start] + null_code + data[end:]
+    data = data.replace(b"</substanceAdministration>", SIG, 1)
+    out, report = synthesize(data, seed="s")
+    assert report.residual_findings == []
+    root = etree.fromstring(out)
+    vaccine = vaccine_code(root)
+    assert vaccine.get("nullFlavor") == "OTH" and vaccine.get("code") is None
+    translation = vaccine.find("c:translation", NS)
+    assert translation.get("codeSystem") == "2.16.840.1.113883.6.96"
+    assert len(translation.get("code")) == 12 and translation.get("displayName") == "Removed"
+    assert b"Percutaneous" not in out
+    sig_code = root.xpath(".//c:substanceAdministration/c:code[@code='76662-6']", namespaces=NS)
+    assert len(sig_code) == 1 and sig_code[0].get("displayName") == "Medication Instructions"
+    assert b"Take with food" not in out
+
+
+def test_unplaced_narrative_ids_land_on_named_content(pair):
+    _, _, out, _ = pair
+    root = etree.fromstring(out)
+    contents = [el for el in root.iter("{urn:hl7-org:v3}content") if el.get("ID")]
+    for content in contents:
+        assert content.text and content.text.strip()
+        assert content.text == content.getparent().getparent().find("c:td", NS).text
+
+
 def test_patient_facing_note_is_blanked_without_report():
     data = HANDWRITTEN.read_bytes().replace(b"    </structuredBody>", PATIENT_NOTE)
     out, report = synthesize(data, seed="s")

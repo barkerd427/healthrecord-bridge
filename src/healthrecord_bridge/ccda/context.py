@@ -27,6 +27,8 @@ class Context:
     patient_ref: dict = field(default_factory=dict)
     unmapped: set[str] = field(default_factory=set)
     truncated_timestamps: int = 0
+    id_owners: dict[tuple[str, CdaId], etree._Element] = field(default_factory=dict)
+    """Element that first claimed each (resource type, CDA id) pair."""
 
     # ---- codes and text ---------------------------------------------------------
 
@@ -124,12 +126,19 @@ class Context:
 
         The id derives from the element's first ``id``; without one it derives
         from the document id plus ``fallback_parts`` (section code, ordinals).
+        When another element of the same resource type already used that CDA id
+        (Epic reuses ids inside result organizers) the parts, or failing those
+        the element's path, are added so the two resources stay distinct.
         """
         cda_ids = self.ids_of(el)
+        parts = [str(p) for p in fallback_parts if p is not None]
         if cda_ids:
-            rid = resource_id(resource_type, cda_ids[0])
+            owner = self.id_owners.setdefault((resource_type, cda_ids[0]), el)
+            if owner is el:
+                rid = resource_id(resource_type, cda_ids[0])
+            else:
+                rid = resource_id(resource_type, cda_ids[0], *(parts or [_path_of(el)]))
         else:
-            parts = [str(p) for p in fallback_parts if p is not None]
             rid = fallback_id(resource_type, self.doc.id, *parts)
         resource: dict = {
             "resourceType": resource_type,
@@ -154,6 +163,10 @@ class Context:
         if display:
             ref["display"] = display
         return ref
+
+
+def _path_of(el: etree._Element) -> str:
+    return el.getroottree().getpath(el)
 
 
 def status_code(el: etree._Element | None) -> str | None:

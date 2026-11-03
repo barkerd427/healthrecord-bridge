@@ -37,6 +37,7 @@ _STATUS = {
     "new": "registered",
 }
 _INTERPRETATION = "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation"
+_DATA_ABSENT = "http://terminology.hl7.org/CodeSystem/data-absent-reason"
 
 
 def build_observation(
@@ -92,11 +93,17 @@ def _loinc_code(cc: dict) -> str | None:
 def _set_value(ctx: Context, res: dict, obs: etree._Element, smoking: bool) -> None:
     for value in children(obs, "value"):
         if attr(value, "nullFlavor"):
-            res["dataAbsentReason"] = simple_concept(
-                "http://terminology.hl7.org/CodeSystem/data-absent-reason", "unknown", "Unknown"
-            )
+            res["dataAbsentReason"] = simple_concept(_DATA_ABSENT, "unknown", "Unknown")
             return
         kind = xsi_type(value) or "ST"
+        if kind == "ED" and (ref := child(value, "reference")) is not None:
+            # Epic puts text results in the narrative and points at them.
+            text = ctx.doc.narrative.resolve(attr(ref, "value")) or text_of(value)
+            if text:
+                res["valueString"] = text
+            else:
+                res["dataAbsentReason"] = simple_concept(_DATA_ABSENT, "unknown", "Unknown")
+            return
         if kind == "PQ":
             q = quantity(value)
             if q is not None:

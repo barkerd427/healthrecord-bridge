@@ -139,6 +139,7 @@ def test_synthea_allergies():
     assert len(allergies) == 4
     codes = {a["code"]["coding"][0]["code"] for a in allergies}
     assert codes == {"419474003", "418689008", "425525006", "91934008"}
+    # originalText is carried to text even when the coding has a display.
     mould = _one(
         allergies,
         code={
@@ -148,7 +149,8 @@ def test_synthea_allergies():
                     "code": "419474003",
                     "display": "Allergy to mould",
                 }
-            ]
+            ],
+            "text": "Allergy to mould",
         },
     )
     assert mould["clinicalStatus"]["coding"][0]["code"] == "active"
@@ -408,22 +410,20 @@ def test_synthea_lab_value_and_report_text():
     labs = [
         o for o in types["Observation"] if o["category"][0]["coding"][0]["code"] == "laboratory"
     ]
-    leuk = _one(
-        labs,
-        code={
-            "coding": [
-                {
-                    "system": "http://loinc.org",
-                    "code": "6690-2",
-                    "display": "Leukocytes [#/volume] in Blood by Automated count",
-                }
-            ]
-        },
-    )
+    leuk = _one(labs, effectiveDateTime="2015-05-27")
+    assert leuk["code"]["coding"] == [
+        {
+            "system": "http://loinc.org",
+            "code": "6690-2",
+            "display": "Leukocytes [#/volume] in Blood by Automated count",
+        }
+    ]
     assert leuk["valueQuantity"]["value"] == 8.772995479243308
     assert leuk["valueQuantity"]["code"] == "10*3/uL"
-    assert leuk["effectiveDateTime"] == "2015-05-27"
-    assert "text" not in leuk["code"]
+    # Synthea points originalText at the panel row, which is now kept as text.
+    assert (
+        leuk["code"]["text"] == "Complete blood count (hemogram) panel - Blood by Automated count"
+    )
 
 
 def test_immunizations():
